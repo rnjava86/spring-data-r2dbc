@@ -65,9 +65,6 @@ import org.springframework.util.Assert;
  */
 class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 
-	/**
-	 * Logger available to subclasses
-	 */
 	private final Log logger = LogFactory.getLog(getClass());
 
 	private final ConnectionFactory connector;
@@ -76,14 +73,18 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 
 	private final ReactiveDataAccessStrategy dataAccessStrategy;
 
+	private final NamedParameterSupport namedParameterSupport;
+
 	private final DefaultDatabaseClientBuilder builder;
 
 	DefaultDatabaseClient(ConnectionFactory connector, R2dbcExceptionTranslator exceptionTranslator,
-						  ReactiveDataAccessStrategy dataAccessStrategy, DefaultDatabaseClientBuilder builder) {
+			ReactiveDataAccessStrategy dataAccessStrategy, NamedParameterSupport namedParameterSupport,
+			DefaultDatabaseClientBuilder builder) {
 
 		this.connector = connector;
 		this.exceptionTranslator = exceptionTranslator;
 		this.dataAccessStrategy = dataAccessStrategy;
+		this.namedParameterSupport = namedParameterSupport;
 		this.builder = builder;
 	}
 
@@ -198,15 +199,15 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	 */
 	protected Connection createConnectionProxy(Connection con) {
 		return (Connection) Proxy.newProxyInstance(ConnectionProxy.class.getClassLoader(),
-				new Class<?>[]{ConnectionProxy.class}, new CloseSuppressingInvocationHandler(con));
+				new Class<?>[] { ConnectionProxy.class }, new CloseSuppressingInvocationHandler(con));
 	}
 
 	/**
 	 * Translate the given {@link R2dbcException} into a generic {@link DataAccessException}.
 	 *
 	 * @param task readable text describing the task being attempted.
-	 * @param sql  SQL query or update that caused the problem (may be {@literal null}).
-	 * @param ex   the offending {@link R2dbcException}.
+	 * @param sql SQL query or update that caused the problem (may be {@literal null}).
+	 * @param ex the offending {@link R2dbcException}.
 	 * @return a DataAccessException wrapping the {@link R2dbcException} (never {@literal null}).
 	 */
 	protected DataAccessException translateException(String task, @Nullable String sql, R2dbcException ex) {
@@ -219,7 +220,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	 * Customization hook.
 	 */
 	protected <T> DefaultTypedExecuteSpec<T> createTypedExecuteSpec(Map<Integer, SettableValue> byIndex,
-																	Map<String, SettableValue> byName, Supplier<String> sqlSupplier, Class<T> typeToRead) {
+			Map<String, SettableValue> byName, Supplier<String> sqlSupplier, Class<T> typeToRead) {
 		return new DefaultTypedExecuteSpec<>(byIndex, byName, sqlSupplier, typeToRead);
 	}
 
@@ -227,8 +228,8 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	 * Customization hook.
 	 */
 	protected <T> DefaultTypedExecuteSpec<T> createTypedExecuteSpec(Map<Integer, SettableValue> byIndex,
-																	Map<String, SettableValue> byName, Supplier<String> sqlSupplier,
-																	BiFunction<Row, RowMetadata, T> mappingFunction) {
+			Map<String, SettableValue> byName, Supplier<String> sqlSupplier,
+			BiFunction<Row, RowMetadata, T> mappingFunction) {
 		return new DefaultTypedExecuteSpec<>(byIndex, byName, sqlSupplier, mappingFunction);
 	}
 
@@ -236,7 +237,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	 * Customization hook.
 	 */
 	protected ExecuteSpecSupport createGenericExecuteSpec(Map<Integer, SettableValue> byIndex,
-														  Map<String, SettableValue> byName, Supplier<String> sqlSupplier) {
+			Map<String, SettableValue> byName, Supplier<String> sqlSupplier) {
 		return new DefaultGenericExecuteSpec(byIndex, byName, sqlSupplier);
 	}
 
@@ -248,7 +249,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	}
 
 	private static void doBind(Statement<?> statement, Map<String, SettableValue> byName,
-							   Map<Integer, SettableValue> byIndex) {
+			Map<Integer, SettableValue> byIndex) {
 
 		byIndex.forEach((i, o) -> {
 
@@ -322,8 +323,21 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 					logger.debug("Executing SQL statement [" + sql + "]");
 				}
 
-				Statement<?> statement = it.createStatement(sql);
-				doBind(statement, byName, byIndex);
+				BindableOperation operation = namedParameterSupport.expand(sql, dataAccessStrategy.getBindMarkersFactory(),
+						new MapBindParameterSource(byName));
+
+				Statement<?> statement = it.createStatement(operation.toQuery());
+
+				byName.forEach((name, o) -> {
+
+					if (o.getValue() != null) {
+						operation.bind(statement, name, o.getValue());
+					} else {
+						operation.bindNull(statement, name, o.getType());
+					}
+				});
+
+				doBind(statement, Collections.emptyMap(), byIndex);
 
 				return statement;
 			};
@@ -374,7 +388,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		}
 
 		protected ExecuteSpecSupport createInstance(Map<Integer, SettableValue> byIndex, Map<String, SettableValue> byName,
-													Supplier<String> sqlSupplier) {
+				Supplier<String> sqlSupplier) {
 			return new ExecuteSpecSupport(byIndex, byName, sqlSupplier);
 		}
 
@@ -392,7 +406,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	protected class DefaultGenericExecuteSpec extends ExecuteSpecSupport implements GenericExecuteSpec {
 
 		DefaultGenericExecuteSpec(Map<Integer, SettableValue> byIndex, Map<String, SettableValue> byName,
-								  Supplier<String> sqlSupplier) {
+				Supplier<String> sqlSupplier) {
 			super(byIndex, byName, sqlSupplier);
 		}
 
@@ -453,7 +467,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 
 		@Override
 		protected ExecuteSpecSupport createInstance(Map<Integer, SettableValue> byIndex, Map<String, SettableValue> byName,
-													Supplier<String> sqlSupplier) {
+				Supplier<String> sqlSupplier) {
 			return createGenericExecuteSpec(byIndex, byName, sqlSupplier);
 		}
 	}
@@ -468,7 +482,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		private final BiFunction<Row, RowMetadata, T> mappingFunction;
 
 		DefaultTypedExecuteSpec(Map<Integer, SettableValue> byIndex, Map<String, SettableValue> byName,
-								Supplier<String> sqlSupplier, Class<T> typeToRead) {
+				Supplier<String> sqlSupplier, Class<T> typeToRead) {
 
 			super(byIndex, byName, sqlSupplier);
 
@@ -477,7 +491,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		}
 
 		DefaultTypedExecuteSpec(Map<Integer, SettableValue> byIndex, Map<String, SettableValue> byName,
-								Supplier<String> sqlSupplier, BiFunction<Row, RowMetadata, T> mappingFunction) {
+				Supplier<String> sqlSupplier, BiFunction<Row, RowMetadata, T> mappingFunction) {
 
 			super(byIndex, byName, sqlSupplier);
 
@@ -538,7 +552,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 
 		@Override
 		protected DefaultTypedExecuteSpec<T> createInstance(Map<Integer, SettableValue> byIndex,
-															Map<String, SettableValue> byName, Supplier<String> sqlSupplier) {
+				Map<String, SettableValue> byName, Supplier<String> sqlSupplier) {
 			return createTypedExecuteSpec(byIndex, byName, sqlSupplier, typeToRead);
 		}
 	}
@@ -625,7 +639,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		}
 
 		protected abstract DefaultSelectSpecSupport createInstance(String table, List<String> projectedFields, Sort sort,
-																   Pageable page);
+				Pageable page);
 	}
 
 	private class DefaultGenericSelectSpec extends DefaultSelectSpecSupport implements GenericSelectSpec {
@@ -692,7 +706,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 
 		@Override
 		protected DefaultGenericSelectSpec createInstance(String table, List<String> projectedFields, Sort sort,
-														  Pageable page) {
+				Pageable page) {
 			return new DefaultGenericSelectSpec(table, projectedFields, sort, page);
 		}
 	}
@@ -703,8 +717,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 	@SuppressWarnings("unchecked")
 	private class DefaultTypedSelectSpec<T> extends DefaultSelectSpecSupport implements TypedSelectSpec<T> {
 
-		private final @Nullable
-		Class<T> typeToRead;
+		private final @Nullable Class<T> typeToRead;
 		private final BiFunction<Row, RowMetadata, T> mappingFunction;
 
 		DefaultTypedSelectSpec(Class<T> typeToRead) {
@@ -716,12 +729,12 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		}
 
 		DefaultTypedSelectSpec(String table, List<String> projectedFields, Sort sort, Pageable page,
-							   BiFunction<Row, RowMetadata, T> mappingFunction) {
+				BiFunction<Row, RowMetadata, T> mappingFunction) {
 			this(table, projectedFields, sort, page, null, mappingFunction);
 		}
 
 		DefaultTypedSelectSpec(String table, List<String> projectedFields, Sort sort, Pageable page, Class<T> typeToRead,
-							   BiFunction<Row, RowMetadata, T> mappingFunction) {
+				BiFunction<Row, RowMetadata, T> mappingFunction) {
 			super(table, projectedFields, sort, page);
 			this.typeToRead = typeToRead;
 			this.mappingFunction = mappingFunction;
@@ -781,7 +794,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 
 		@Override
 		protected DefaultTypedSelectSpec<T> createInstance(String table, List<String> projectedFields, Sort sort,
-														   Pageable page) {
+				Pageable page) {
 			return new DefaultTypedSelectSpec<>(table, projectedFields, sort, page, typeToRead, mappingFunction);
 		}
 	}
@@ -1019,8 +1032,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		} catch (R2dbcException e) {
 
 			String sql = getSql(action);
-			return Flux.error(new UncategorizedR2dbcException("doInConnectionMany", sql, e) {
-			});
+			return Flux.error(new UncategorizedR2dbcException("doInConnectionMany", sql, e) {});
 		}
 	}
 
@@ -1031,8 +1043,7 @@ class DefaultDatabaseClient implements DatabaseClient, ConnectionAccessor {
 		} catch (R2dbcException e) {
 
 			String sql = getSql(action);
-			return Mono.error(new UncategorizedR2dbcException("doInConnection", sql, e) {
-			});
+			return Mono.error(new UncategorizedR2dbcException("doInConnection", sql, e) {});
 		}
 	}
 
